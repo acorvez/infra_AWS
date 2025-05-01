@@ -1,0 +1,64 @@
+---
+# Génération des fichiers de configuration pour le client VPN
+- name: Création du répertoire pour les fichiers VPN
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/files/vpn"
+    state: directory
+    mode: '0755'
+
+- name: Téléchargement de la configuration client VPN
+  ansible.builtin.shell: >
+    aws ec2 export-client-vpn-client-configuration 
+    --client-vpn-endpoint-id {{ vpn_endpoint_id }} 
+    --output text > {{ playbook_dir }}/files/vpn/vpn-base-config.ovpn
+  args:
+    creates: "{{ playbook_dir }}/files/vpn/vpn-base-config.ovpn"
+  register: vpn_config_download
+  changed_when: vpn_config_download.rc == 0
+
+- name: Copie des certificats client VPN
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../terraform/modules/vpn/certs/{{ item }}"
+    dest: "{{ playbook_dir }}/files/vpn/{{ item }}"
+    mode: '0600'
+  loop:
+    - ca.crt
+    - client1.crt
+    - client1.key
+  when: vpn_config_download.changed
+
+- name: Mise à jour de la configuration client VPN avec les chemins de certificats
+  ansible.builtin.blockinfile:
+    path: "{{ playbook_dir }}/files/vpn/vpn-base-config.ovpn"
+    block: |
+      
+      cert {{ playbook_dir }}/files/vpn/client1.crt
+      key {{ playbook_dir }}/files/vpn/client1.key
+      ca {{ playbook_dir }}/files/vpn/ca.crt
+  when: vpn_config_download.changed
+
+- name: Création d'un script pour se connecter au VPN
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/files/vpn/connect-vpn.sh"
+    content: |
+      #!/bin/bash
+      
+      echo "Connexion au VPN {{ project_name }}-{{ environment }}..."
+      echo "Vous aurez peut-être besoin de droits sudo pour cette opération."
+      
+      sudo openvpn --config "{{ playbook_dir }}/files/vpn/vpn-base-config.ovpn"
+    mode: '0755'
+  when: vpn_config_download.changed
+
+- name: Affichage des instructions VPN
+  ansible.builtin.debug:
+    msg:
+      - "Configuration VPN générée avec succès."
+      - "Pour vous connecter au VPN, exécutez :"
+      - "{{ playbook_dir }}/files/vpn/connect-vpn.sh"
+      - ""
+      - "Assurez-vous que OpenVPN est installé sur votre système."
+      - "Sur Ubuntu/Debian : sudo apt-get install openvpn"
+      - "Sur macOS avec Homebrew : brew install openvpn"
+      - "Sur Windows, téléchargez OpenVPN GUI depuis https://openvpn.net/community-downloads/"
+  when: vpn_config_download.changed

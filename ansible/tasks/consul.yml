@@ -1,0 +1,131 @@
+---
+# Déploiement de Consul
+- name: Ajout du dépôt Helm HashiCorp
+  kubernetes.core.helm_repository:
+    name: hashicorp
+    repo_url: https://helm.releases.hashicorp.com
+
+- name: Création du fichier de valeurs pour Consul
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/files/consul-values.yaml"
+    content: |
+      global:
+        name: consul
+        datacenter: {{ consul_datacenter }}
+        image: "hashicorp/consul:{{ consul_version }}"
+        
+      server:
+        replicas: {{ consul_replicas }}
+        bootstrapExpect: {{ consul_replicas }}
+        disruptionBudget:
+          enabled: true
+          maxUnavailable: 1
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        storage:
+          enabled: true
+          storageClass: "efs-sc"
+          size: 10Gi
+        
+      client:
+        enabled: true
+        grpc: true
+        resources:
+          requests:
+            memory: "100Mi"
+            cpu: "50m"
+          limits:
+            memory: "200Mi"
+            cpu: "200m"
+        
+      ui:
+        enabled: true
+        service:
+          enabled: true
+          type: ClusterIP
+          
+      connectInject:
+        enabled: true
+        
+      controller:
+        enabled: true
+        
+      syncCatalog:
+        enabled: true
+        
+      prometheus:
+        enabled: true
+
+- name: Déploiement de Consul
+  kubernetes.core.helm:
+    name: consul
+    chart_ref: hashicorp/consul
+    release_namespace: discovery
+    create_namespace: false
+    values_files:
+      - "{{ playbook_dir }}/files/consul-values.yaml"
+
+- name: Attente que Consul soit prêt
+  kubernetes.core.k8s_info:
+    kind: StatefulSet
+    name: consul-server
+    namespace: discovery
+  register: consul_sts
+  until: consul_sts.resources[0].status.readyReplicas is defined and consul_sts.resources[0].status.readyReplicas == consul_replicas
+  retries: 15
+  delay: 30
+
+- name: Création d'un Ingress pour l'interface utilisateur Consul
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: consul-ui-ingress
+        namespace: discovery
+        annotations:
+          kubernetes.io/ingress.class: alb
+          alb.ingress.kubernetes.io/scheme: internet-facing
+          alb.ingress.kubernetes.io/target-type: ip
+          alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+          alb.ingress.kubernetes.io/ssl-redirect: "443"
+      spec:
+        rules:
+        - host: "{{ consul_domain }}"
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: consul-ui
+                  port:
+                    number: 80
+
+- name: Configuration des règles de sécurité pour Consul
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: consul-acl-config
+        namespace: discovery
+      data:
+        consul-acl-init.json: |
+          {
+            "acl": {
+              "enabled": true,
+              "default_policy": "deny",
+              "down_policy": "extend-cache",
+              "tokens": {
+                "master": "{{ lookup('password', '/dev/null length=36 chars=ascii_letters,digits') }}"
+              }
+            }
+          }

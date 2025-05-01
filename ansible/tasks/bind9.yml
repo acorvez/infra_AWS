@@ -1,0 +1,203 @@
+---
+# Déploiement de Bind9
+- name: Création du ConfigMap pour la configuration Bind9
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: bind9-config
+        namespace: discovery
+      data:
+        named.conf: |
+          options {
+            directory "/var/cache/bind";
+            forwarders {
+              8.8.8.8;
+              8.8.4.4;
+            };
+            allow-query { any; };
+            allow-recursion { any; };
+            listen-on { any; };
+            dnssec-validation auto;
+          };
+          
+          zone "{{ base_domain }}" {
+            type master;
+            file "/etc/bind/zones/{{ base_domain }}.zone";
+          };
+          
+        "{{ base_domain }}.zone": |
+          $TTL 86400
+          @ IN SOA ns1.{{ base_domain }}. admin.{{ base_domain }}. (
+            2023031500 ; Serial
+            3600       ; Refresh
+            1800       ; Retry
+            604800     ; Expire
+            86400      ; Minimum TTL
+          )
+          
+          @              IN  NS     ns1.{{ base_domain }}.
+          ns1            IN  A      ${POD_IP}
+          
+          ; Services Publics
+          grafana         IN  A      ${ALB_IP}
+          auth            IN  A      ${ALB_IP}
+          phpldapadmin    IN  A      ${ALB_IP}
+          consul          IN  A      ${ALB_IP}
+          
+          ; Services Internes
+          *.internal      IN  A      ${INTERNAL_ALB_IP}
+          keycloak        IN  CNAME  auth.{{ base_domain }}.
+          prometheus      IN  CNAME  grafana.{{ base_domain }}.
+          loki            IN  CNAME  grafana.{{ base_domain }}.
+
+- name: Création du Deployment pour Bind9
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: bind9
+        namespace: discovery
+        labels:
+          app: bind9
+      spec:
+        replicas: 2
+        selector:
+          matchLabels:
+            app: bind9
+        template:
+          metadata:
+            labels:
+              app: bind9
+          spec:
+            containers:
+            - name: bind9
+              image: "ubuntu/bind9:{{ bind9_version }}"
+              ports:
+              - containerPort: 53
+                protocol: UDP
+              - containerPort: 53
+                protocol: TCP
+              env:
+              - name: POD_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+              - name: ALB_IP
+                value: "{{ lookup('env', 'ALB_IP', default='0.0.0.0') }}"
+              - name: INTERNAL_ALB_IP
+                value: "{{ lookup('env', 'INTERNAL_ALB_IP', default='0.0.0.0') }}"
+              volumeMounts:
+              - name: config
+                mountPath: /etc/bind/named.conf
+                subPath: named.conf
+              - name: zones
+                mountPath: /etc/bind/zones/{{ base_domain }}.zone
+                subPath: "{{ base_domain }}.zone"
+              - name: cache
+                mountPath: /var/cache/bind
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "200m"
+              livenessProbe:
+                exec:
+                  command:
+                  - dig
+                  - "@127.0.0.1"
+                  - -t
+                  - A
+                  - "ns1.{{ base_domain }}"
+                initialDelaySeconds: 30
+                periodSeconds: 10
+              readinessProbe:
+                exec:
+                  command:
+                  - dig
+                  - "@127.0.0.1"
+                  - -t
+                  - A
+                  - "ns1.{{ base_domain }}"
+                initialDelaySeconds: 5
+                periodSeconds: 10
+            volumes:
+            - name: config
+              configMap:
+                name: bind9-config
+                items:
+                - key: named.conf
+                  path: named.conf
+            - name: zones
+              configMap:
+                name: bind9-config
+                items:
+                - key: "{{ base_domain }}.zone"
+                  path: "{{ base_domain }}.zone"
+            - name: cache
+              emptyDir: {}
+
+- name: Création du Service pour Bind9
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: bind9
+        namespace: discovery
+        labels:
+          app: bind9
+      spec:
+        selector:
+          app: bind9
+        ports:
+        - name: dns-tcp
+          port: 53
+          protocol: TCP
+        - name: dns-udp
+          port: 53
+          protocol: UDP
+        type: ClusterIP
+
+- name: Création du Service pour exposer Bind9 dans le VPC
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: bind9-vpc
+        namespace: discovery
+        labels:
+          app: bind9
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+          service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+      spec:
+        selector:
+          app: bind9
+        ports:
+        - name: dns-tcp
+          port: 53
+          protocol: TCP
+        - name: dns-udp
+          port: 53
+          protocol: UDP
+        type: LoadBalancer
+
+- name: Attente que Bind9 soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: bind9
+    namespace: discovery
+  register: bind9_deployment
+  until: bind9_deployment.resources[0].status.readyReplicas is defined and bind9_deployment.resources[0].status.readyReplicas > 0
+  retries: 10
+  delay: 30

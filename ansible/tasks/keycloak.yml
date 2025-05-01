@@ -1,0 +1,284 @@
+---
+# Déploiement de Keycloak
+- name: Création du secret pour la base de données Keycloak
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: keycloak-db-secret
+        namespace: auth
+      type: Opaque
+      stringData:
+        DB_USER: "{{ keycloak_db_user }}"
+        DB_PASSWORD: "{{ keycloak_db_password }}"
+        DB_NAME: "{{ keycloak_db_name }}"
+        DB_HOST: "{{ rds_endpoint | regex_replace(':.*$', '') }}"
+        DB_PORT: "5432"
+        KEYCLOAK_ADMIN: "{{ keycloak_admin_user }}"
+        KEYCLOAK_ADMIN_PASSWORD: "{{ keycloak_admin_password }}"
+
+- name: Déploiement de Keycloak dans le sous-réseau privé
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: keycloak-private
+        namespace: auth
+        labels:
+          app: keycloak
+          tier: private
+      spec:
+        replicas: "{{ keycloak_replicas }}"
+        selector:
+          matchLabels:
+            app: keycloak
+            tier: private
+        template:
+          metadata:
+            labels:
+              app: keycloak
+              tier: private
+          spec:
+            containers:
+            - name: keycloak
+              image: "quay.io/keycloak/keycloak:{{ keycloak_version }}"
+              args: ["start", "--optimized"]
+              ports:
+              - name: http
+                containerPort: 8080
+              - name: https
+                containerPort: 8443
+              env:
+              - name: KC_DB
+                value: "postgres"
+              - name: KC_DB_URL
+                value: "jdbc:postgresql://$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
+              - name: KC_DB_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: DB_USER
+              - name: KC_DB_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: DB_PASSWORD
+              - name: KEYCLOAK_ADMIN
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: KEYCLOAK_ADMIN
+              - name: KEYCLOAK_ADMIN_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: KEYCLOAK_ADMIN_PASSWORD
+              - name: KC_PROXY
+                value: "edge"
+              - name: KC_HOSTNAME_STRICT
+                value: "false"
+              - name: KC_HTTP_ENABLED
+                value: "true"
+              - name: KC_HEALTH_ENABLED
+                value: "true"
+              - name: KC_METRICS_ENABLED
+                value: "true"
+              resources:
+                requests:
+                  memory: "1Gi"
+                  cpu: "500m"
+                limits:
+                  memory: "2Gi"
+                  cpu: "1000m"
+              readinessProbe:
+                httpGet:
+                  path: "/health/ready"
+                  port: 8080
+                initialDelaySeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                httpGet:
+                  path: "/health/live"
+                  port: 8080
+                initialDelaySeconds: 60
+                timeoutSeconds: 5
+
+- name: Création du service pour Keycloak privé
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: keycloak-private
+        namespace: auth
+        labels:
+          app: keycloak
+          tier: private
+      spec:
+        selector:
+          app: keycloak
+          tier: private
+        ports:
+        - name: http
+          port: 8080
+          targetPort: 8080
+        - name: https
+          port: 8443
+          targetPort: 8443
+        type: ClusterIP
+
+- name: Déploiement de Keycloak dans le sous-réseau public
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: keycloak-public
+        namespace: auth
+        labels:
+          app: keycloak
+          tier: public
+      spec:
+        replicas: "{{ keycloak_replicas }}"
+        selector:
+          matchLabels:
+            app: keycloak
+            tier: public
+        template:
+          metadata:
+            labels:
+              app: keycloak
+              tier: public
+          spec:
+            containers:
+            - name: keycloak
+              image: "quay.io/keycloak/keycloak:{{ keycloak_version }}"
+              args: ["start", "--optimized"]
+              ports:
+              - name: http
+                containerPort: 8080
+              - name: https
+                containerPort: 8443
+              env:
+              - name: KC_DB
+                value: "postgres"
+              - name: KC_DB_URL
+                value: "jdbc:postgresql://$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
+              - name: KC_DB_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: DB_USER
+              - name: KC_DB_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: DB_PASSWORD
+              - name: KEYCLOAK_ADMIN
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: KEYCLOAK_ADMIN
+              - name: KEYCLOAK_ADMIN_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: keycloak-db-secret
+                    key: KEYCLOAK_ADMIN_PASSWORD
+              - name: KC_PROXY
+                value: "edge"
+              - name: KC_HOSTNAME
+                value: "{{ keycloak_hostname }}"
+              - name: KC_HTTP_ENABLED
+                value: "true"
+              - name: KC_HEALTH_ENABLED
+                value: "true"
+              - name: KC_METRICS_ENABLED
+                value: "true"
+              resources:
+                requests:
+                  memory: "1Gi"
+                  cpu: "500m"
+                limits:
+                  memory: "2Gi"
+                  cpu: "1000m"
+              readinessProbe:
+                httpGet:
+                  path: "/health/ready"
+                  port: 8080
+                initialDelaySeconds: 30
+                timeoutSeconds: 5
+              livenessProbe:
+                httpGet:
+                  path: "/health/live"
+                  port: 8080
+                initialDelaySeconds: 60
+                timeoutSeconds: 5
+
+- name: Création du service pour Keycloak public
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: keycloak-public
+        namespace: auth
+        labels:
+          app: keycloak
+          tier: public
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+          service.beta.kubernetes.io/aws-load-balancer-internal: "false"
+      spec:
+        selector:
+          app: keycloak
+          tier: public
+        ports:
+        - name: http
+          port: 80
+          targetPort: 8080
+        type: LoadBalancer
+
+- name: Attente que Keycloak soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: keycloak-public
+    namespace: auth
+  register: keycloak_deployment
+  until: keycloak_deployment.resources[0].status.readyReplicas is defined and keycloak_deployment.resources[0].status.readyReplicas > 0
+  retries: 10
+  delay: 30
+
+- name: Configuration de l'ingress pour Keycloak
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: keycloak-ingress
+        namespace: auth
+        annotations:
+          kubernetes.io/ingress.class: "alb"
+          alb.ingress.kubernetes.io/scheme: "internet-facing"
+          alb.ingress.kubernetes.io/target-type: "ip"
+          alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+          alb.ingress.kubernetes.io/ssl-redirect: "443"
+      spec:
+        rules:
+        - host: "{{ keycloak_hostname }}"
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: keycloak-public
+                  port:
+                    number: 80

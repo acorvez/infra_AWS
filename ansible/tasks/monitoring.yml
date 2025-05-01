@@ -1,0 +1,213 @@
+---
+# Déploiement de Prometheus, Grafana et Loki
+- name: Ajout du dépôt Helm Prometheus Community
+  kubernetes.core.helm_repository:
+    name: prometheus-community
+    repo_url: https://prometheus-community.github.io/helm-charts
+
+- name: Ajout du dépôt Helm Grafana
+  kubernetes.core.helm_repository:
+    name: grafana
+    repo_url: https://grafana.github.io/helm-charts
+
+- name: Création du fichier de valeurs pour Prometheus
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/files/prometheus-values.yaml"
+    content: |
+      server:
+        persistentVolume:
+          enabled: true
+          size: 20Gi
+          storageClass: gp2
+        retention: 15d
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+      
+      alertmanager:
+        enabled: true
+        persistentVolume:
+          enabled: true
+          size: 5Gi
+          storageClass: gp2
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 200m
+            memory: 512Mi
+      
+      nodeExporter:
+        enabled: true
+      
+      pushgateway:
+        enabled: true
+      
+      kubeStateMetrics:
+        enabled: true
+
+- name: Déploiement de Prometheus
+  kubernetes.core.helm:
+    name: prometheus
+    chart_ref: prometheus-community/prometheus
+    release_namespace: monitoring
+    create_namespace: false
+    values_files:
+      - "{{ playbook_dir }}/files/prometheus-values.yaml"
+
+- name: Création du fichier de valeurs pour Loki
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/files/loki-values.yaml"
+    content: |
+      loki:
+        auth_enabled: false
+        storage:
+          type: s3
+          s3:
+            s3ForcePathStyle: true
+            bucketnames: loki-logs-{{ project_name }}-{{ environment }}
+            region: {{ aws_region }}
+            access_key_id: {{ lookup('env', 'AWS_ACCESS_KEY_ID') }}
+            secret_access_key: {{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}
+      
+      persistence:
+        enabled: true
+        size: 10Gi
+        storageClass: gp2
+      
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+      
+      serviceAccount:
+        create: true
+        name: loki
+        annotations:
+          eks.amazonaws.com/role-arn: "{{ lookup('env', 'LOKI_ROLE_ARN', default='') }}"
+
+- name: Déploiement de Loki
+  kubernetes.core.helm:
+    name: loki
+    chart_ref: grafana/loki
+    release_namespace: monitoring
+    create_namespace: false
+    values_files:
+      - "{{ playbook_dir }}/files/loki-values.yaml"
+
+- name: Création du secret pour Grafana
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: grafana-admin-credentials
+        namespace: monitoring
+      type: Opaque
+      stringData:
+        admin-user: "{{ grafana_admin_user }}"
+        admin-password: "{{ grafana_admin_password }}"
+
+- name: Création du fichier de valeurs pour Grafana
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/files/grafana-values.yaml"
+    content: |
+      admin:
+        existingSecret: grafana-admin-credentials
+        userKey: admin-user
+        passwordKey: admin-password
+      
+      persistence:
+        enabled: true
+        size: 10Gi
+        storageClass: gp2
+      
+      datasources:
+        datasources.yaml:
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              url: http://prometheus-server.monitoring.svc.cluster.local
+              access: proxy
+              isDefault: true
+            - name: Loki
+              type: loki
+              url: http://loki.monitoring.svc.cluster.local:3100
+              access: proxy
+      
+      dashboardProviders:
+        dashboardproviders.yaml:
+          apiVersion: 1
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards/default
+      
+      dashboards:
+        default:
+          kubernetes-cluster:
+            gnetId: 7249
+            revision: 1
+            datasource: Prometheus
+          node-exporter:
+            gnetId: 1860
+            revision: 30
+            datasource: Prometheus
+          loki-logs:
+            gnetId: 13639
+            revision: 1
+            datasource: Loki
+      
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+      
+      ingress:
+        enabled: true
+        annotations:
+          kubernetes.io/ingress.class: alb
+          alb.ingress.kubernetes.io/scheme: internet-facing
+          alb.ingress.kubernetes.io/target-type: ip
+          alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+          alb.ingress.kubernetes.io/ssl-redirect: "443"
+        hosts:
+          - "{{ grafana_hostname }}"
+        path: /
+
+- name: Déploiement de Grafana
+  kubernetes.core.helm:
+    name: grafana
+    chart_ref: grafana/grafana
+    release_namespace: monitoring
+    create_namespace: false
+    values_files:
+      - "{{ playbook_dir }}/files/grafana-values.yaml"
+
+- name: Attente que Grafana soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: grafana
+    namespace: monitoring
+  register: grafana_deployment
+  until: grafana_deployment.resources[0].status.readyReplicas is defined and grafana_deployment.resources[0].status.readyReplicas > 0
+  retries: 10
+  delay: 30

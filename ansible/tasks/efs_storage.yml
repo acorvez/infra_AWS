@@ -1,0 +1,90 @@
+---
+# Configuration du stockage EFS pour Kubernetes
+- name: Création du StorageClass pour EFS
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: efs-sc
+      provisioner: efs.csi.aws.com
+      parameters:
+        provisioningMode: efs-ap
+        fileSystemId: "{{ efs_id }}"
+        directoryPerms: "700"
+        basePath: "/dynamic_provisioning"
+
+- name: Installation du EFS CSI Driver via Helm
+  kubernetes.core.helm:
+    name: aws-efs-csi-driver
+    chart_ref: aws-efs-csi-driver
+    chart_repo_url: https://kubernetes-sigs.github.io/aws-efs-csi-driver/
+    release_namespace: kube-system
+    create_namespace: false
+    values:
+      controller:
+        serviceAccount:
+          create: true
+          annotations:
+            eks.amazonaws.com/role-arn: "{{ lookup('env', 'EFS_CSI_DRIVER_ROLE_ARN', default='') }}"
+
+- name: Attente que le EFS CSI Driver soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: efs-csi-controller
+    namespace: kube-system
+  register: efs_deployment
+  until: efs_deployment.resources[0].status.readyReplicas is defined and efs_deployment.resources[0].status.readyReplicas > 0
+  retries: 10
+  delay: 30
+
+- name: Création du PersistentVolume pour les données communes
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: efs-pv-shared
+      spec:
+        capacity:
+          storage: 5Gi
+        volumeMode: Filesystem
+        accessModes:
+          - ReadWriteMany
+        persistentVolumeReclaimPolicy: Retain
+        storageClassName: efs-sc
+        csi:
+          driver: efs.csi.aws.com
+          volumeHandle: "{{ efs_id }}::fsap-shared"
+          volumeAttributes:
+            encryptInTransit: "true"
+
+- name: Création du PersistentVolumeClaim pour les données communes
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: efs-pvc-shared
+        namespace: storage
+      spec:
+        accessModes:
+          - ReadWriteMany
+        storageClassName: efs-sc
+        resources:
+          requests:
+            storage: 5Gi
+        volumeName: efs-pv-shared
+
+- name: Vérification du PVC
+  kubernetes.core.k8s_info:
+    kind: PersistentVolumeClaim
+    namespace: storage
+    name: efs-pvc-shared
+  register: pvc_info
+  until: pvc_info.resources[0].status.phase == "Bound"
+  retries: 10
+  delay: 10

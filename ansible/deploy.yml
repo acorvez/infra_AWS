@@ -1,0 +1,101 @@
+---
+# Playbook principal pour déployer l'infrastructure sur AWS
+- name: Configuration du cluster EKS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/main.yml
+  
+  tasks:
+    - name: Mise à jour de Kubeconfig pour accéder au cluster EKS
+      ansible.builtin.shell: >
+        aws eks update-kubeconfig 
+        --name {{ eks_cluster_name }} 
+        --region {{ aws_region }}
+      register: kubeconfig_result
+      changed_when: false
+
+    - name: Vérification de l'accès au cluster
+      ansible.builtin.shell: kubectl get nodes
+      register: nodes_check
+      changed_when: false
+      
+    - name: Affichage des nœuds du cluster
+      ansible.builtin.debug:
+        var: nodes_check.stdout_lines
+        
+    - name: Création de l'espace de noms pour le monitoring
+      kubernetes.core.k8s:
+        name: monitoring
+        api_version: v1
+        kind: Namespace
+        state: present
+        
+    - name: Création de l'espace de noms pour l'authentification
+      kubernetes.core.k8s:
+        name: auth
+        api_version: v1
+        kind: Namespace
+        state: present
+        
+    - name: Création de l'espace de noms pour les systèmes de fichiers
+      kubernetes.core.k8s:
+        name: storage
+        api_version: v1
+        kind: Namespace
+        state: present
+        
+    - name: Création de l'espace de noms pour la découverte de services
+      kubernetes.core.k8s:
+        name: discovery
+        api_version: v1
+        kind: Namespace
+        state: present
+        
+    - name: Déploiement de metrics-server
+      kubernetes.core.helm:
+        name: metrics-server
+        chart_ref: metrics-server
+        chart_repo_url: https://kubernetes-sigs.github.io/metrics-server/
+        release_namespace: kube-system
+        create_namespace: false
+        
+    - name: Configuration du stockage EFS pour EKS
+      ansible.builtin.include_tasks: tasks/efs_storage.yml
+      
+    - name: Déploiement de Keycloak
+      ansible.builtin.include_tasks: tasks/keycloak.yml
+      
+    - name: Déploiement d'OpenLDAP
+      ansible.builtin.include_tasks: tasks/openldap.yml
+      
+    - name: Déploiement de Bind9
+      ansible.builtin.include_tasks: tasks/bind9.yml
+      
+    - name: Déploiement de Consul
+      ansible.builtin.include_tasks: tasks/consul.yml
+      
+    - name: Déploiement de CephFS
+      ansible.builtin.include_tasks: tasks/cephfs.yml
+      
+    - name: Déploiement de la stack de monitoring (Prometheus, Grafana, Loki)
+      ansible.builtin.include_tasks: tasks/monitoring.yml
+      
+    - name: Configuration de l'ALB pour les services
+      ansible.builtin.include_tasks: tasks/alb_routes.yml
+      
+    - name: Configuration CI/CD avec Flux
+      ansible.builtin.include_tasks: tasks/flux_cd.yml
+      
+    - name: Vérification du déploiement complet
+      ansible.builtin.shell: kubectl get pods --all-namespaces
+      register: all_pods
+      changed_when: false
+      
+    - name: Affichage de tous les pods
+      ansible.builtin.debug:
+        var: all_pods.stdout_lines
+        
+    - name: Création des fichiers de configuration VPN Client
+      ansible.builtin.include_tasks: tasks/vpn_client_config.yml

@@ -1,0 +1,158 @@
+---
+# Configuration des routes ALB
+- name: Installation du contrôleur d'ingress AWS ALB
+  kubernetes.core.helm:
+    name: aws-load-balancer-controller
+    chart_ref: eks/aws-load-balancer-controller
+    chart_repo_url: https://aws.github.io/eks-charts
+    release_namespace: kube-system
+    create_namespace: false
+    values:
+      clusterName: "{{ eks_cluster_name }}"
+      serviceAccount:
+        create: true
+        name: aws-load-balancer-controller
+        annotations:
+          eks.amazonaws.com/role-arn: "{{ lookup('env', 'ALB_CONTROLLER_ROLE_ARN', default='') }}"
+      region: "{{ aws_region }}"
+      vpcId: "{{ lookup('env', 'VPC_ID') }}"
+
+- name: Attente que le contrôleur ALB soit prêt
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: aws-load-balancer-controller
+    namespace: kube-system
+  register: alb_controller
+  until: alb_controller.resources[0].status.readyReplicas is defined and alb_controller.resources[0].status.readyReplicas > 0
+  retries: 10
+  delay: 30
+
+- name: Création d'un Ingress pour le service Keycloak public
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: keycloak-ingress
+        namespace: auth
+        annotations:
+          kubernetes.io/ingress.class: alb
+          alb.ingress.kubernetes.io/scheme: internet-facing
+          alb.ingress.kubernetes.io/target-type: ip
+          alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+          alb.ingress.kubernetes.io/ssl-redirect: "443"
+      spec:
+        rules:
+        - host: "{{ keycloak_hostname }}"
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: keycloak-public
+                  port:
+                    number: 80
+
+- name: Récupération des détails de l'ALB public
+  ansible.builtin.shell: >
+    aws elbv2 describe-load-balancers --region {{ aws_region }} --query 'LoadBalancers[?contains(DNSName, `{{ lookup('env', 'ALB_DNS_NAME', default='') }}`)].DNSName' --output text
+  register: alb_dns
+  changed_when: false
+
+- name: Récupération de l'adresse IP de l'ALB public
+  ansible.builtin.shell: >
+    host {{ alb_dns.stdout }} | grep 'has address' | head -1 | awk '{print $4}'
+  register: alb_ip
+  changed_when: false
+  when: alb_dns.stdout != ""
+
+- name: Définition de la variable d'environnement ALB_IP
+  ansible.builtin.set_fact:
+    alb_ip: "{{ alb_ip.stdout }}"
+  when: alb_dns.stdout != "" and alb_ip.stdout is defined
+
+- name: Récupération des détails de l'ALB interne
+  ansible.builtin.shell: >
+    aws elbv2 describe-load-balancers --region {{ aws_region }} --query 'LoadBalancers[?Scheme==`internal`].DNSName' --output text
+  register: internal_alb_dns
+  changed_when: false
+
+- name: Récupération de l'adresse IP de l'ALB interne
+  ansible.builtin.shell: >
+    host {{ internal_alb_dns.stdout }} | grep 'has address' | head -1 | awk '{print $4}'
+  register: internal_alb_ip
+  changed_when: false
+  when: internal_alb_dns.stdout != ""
+
+- name: Définition de la variable d'environnement INTERNAL_ALB_IP
+  ansible.builtin.set_fact:
+    internal_alb_ip: "{{ internal_alb_ip.stdout }}"
+  when: internal_alb_dns.stdout != "" and internal_alb_ip.stdout is defined
+
+- name: Mise à jour du ConfigMap Bind9 avec les IP des ALB
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: bind9-config
+        namespace: discovery
+      data:
+        named.conf: |
+          options {
+            directory "/var/cache/bind";
+            forwarders {
+              8.8.8.8;
+              8.8.4.4;
+            };
+            allow-query { any; };
+            allow-recursion { any; };
+            listen-on { any; };
+            dnssec-validation auto;
+          };
+          
+          zone "{{ base_domain }}" {
+            type master;
+            file "/etc/bind/zones/{{ base_domain }}.zone";
+          };
+          
+        "{{ base_domain }}.zone": |
+          $TTL 86400
+          @ IN SOA ns1.{{ base_domain }}. admin.{{ base_domain }}. (
+            2023031500 ; Serial
+            3600       ; Refresh
+            1800       ; Retry
+            604800     ; Expire
+            86400      ; Minimum TTL
+          )
+          
+          @              IN  NS     ns1.{{ base_domain }}.
+          ns1            IN  A      ${POD_IP}
+          
+          ; Services Publics
+          grafana         IN  A      {{ alb_ip | default('0.0.0.0') }}
+          auth            IN  A      {{ alb_ip | default('0.0.0.0') }}
+          phpldapadmin    IN  A      {{ alb_ip | default('0.0.0.0') }}
+          consul          IN  A      {{ alb_ip | default('0.0.0.0') }}
+          
+          ; Services Internes
+          *.internal      IN  A      {{ internal_alb_ip | default('0.0.0.0') }}
+          keycloak        IN  CNAME  auth.{{ base_domain }}.
+          prometheus      IN  CNAME  grafana.{{ base_domain }}.
+          loki            IN  CNAME  grafana.{{ base_domain }}.
+  when: alb_ip is defined or internal_alb_ip is defined
+
+- name: Redémarrage des pods Bind9 pour appliquer les nouvelles configurations
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: bind9
+        namespace: discovery
+    force: yes
+  when: alb_ip is defined or internal_alb_ip is defined

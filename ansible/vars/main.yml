@@ -1,0 +1,68 @@
+---
+# Informations AWS
+aws_region: "eu-west-1"
+project_name: "platform"
+environment: "dev"
+
+# Informations EKS
+eks_cluster_name: "{{ project_name }}-{{ environment }}-eks"
+
+# Configuration EFS
+efs_id: "{{ lookup('env', 'EFS_ID') }}"
+efs_dns_name: "{{ lookup('env', 'EFS_DNS_NAME') }}"
+
+# Configuration RDS
+rds_endpoint: "{{ lookup('env', 'RDS_ENDPOINT') }}"
+rds_db_name: "{{ lookup('env', 'RDS_DB_NAME') }}"
+rds_username: "{{ lookup('env', 'RDS_USERNAME') }}"
+rds_password: "{{ lookup('env', 'RDS_PASSWORD') }}"
+
+# Configuration Keycloak
+keycloak_version: "22.0.5"
+keycloak_admin_user: "admin"
+keycloak_admin_password: "{{ lookup('env', 'KEYCLOAK_ADMIN_PASSWORD') }}"
+keycloak_db_name: "keycloak"
+keycloak_db_user: "keycloak"
+keycloak_db_password: "{{ lookup('env', 'KEYCLOAK_DB_PASSWORD') }}"
+keycloak_replicas: 2
+keycloak_hostname: "auth.{{ base_domain }}"
+
+# Configuration OpenLDAP
+openldap_admin_password: "{{ lookup('env', 'OPENLDAP_ADMIN_PASSWORD') }}"
+openldap_config_password: "{{ lookup('env', 'OPENLDAP_CONFIG_PASSWORD') }}"
+openldap_domain: "ldap.{{ base_domain }}"
+openldap_organization: "{{ project_name | capitalize }}"
+openldap_replicas: 2
+
+# Configuration CephFS
+ceph_version: "18.1.0"
+ceph_replicas: 3
+ceph_pool_name: "cephfs_data"
+ceph_cluster_name: "ceph"
+
+# Configuration Monitoring
+prometheus_version: "2.48.0"
+grafana_version: "10.2.3"
+loki_version: "2.9.3"
+grafana_admin_user: "admin"
+grafana_admin_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') }}"
+grafana_hostname: "grafana.{{ base_domain }}"
+
+# Configuration DNS
+bind9_version: "9.18"
+base_domain: "example.com"  # Domaine de base pour tous les services
+
+# Configuration VPN
+vpn_endpoint_dns: "{{ lookup('env', 'VPN_ENDPOINT_DNS') }}"
+vpn_endpoint_id: "{{ lookup('env', 'VPN_ENDPOINT_ID') }}"
+
+# Configuration Consul
+consul_version: "1.16.2"
+consul_replicas: 3
+consul_datacenter: "dc1"
+consul_domain: "consul.{{ base_domain }}"
+
+# Configuration CI/CD
+flux_version: "2.1.2"
+git_repository: "git@github.com:organization/infrastructure.git"
+git_branch: "main"
